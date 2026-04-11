@@ -30,12 +30,14 @@ Traditional keyword-based search (TF-IDF, BM25) fails to:
 **👉 RankSmart solves this using ML-based Learning-to-Rank (LTR) with LambdaMART algorithm.**
 
 ## 🧠 Solution Architecture
+```text
 User Query → Candidate Retrieval → Feature Engineering → LambdaMART Ranking → Top-K Results
-↓ ↓ ↓ ↓ ↓
-"python" BM25 + FAISS 20+ Features XGBoost Model Ranked Docs
-Semantic • TF-IDF • 100 trees • Score 0.92
-• BM25 • max_depth=6 • Score 0.87
-• Word overlap • learning_rate=0.1 • Score 0.65
+      ↓               ↓                    ↓                    ↓                ↓
+"python"        BM25 + FAISS        20+ Features        XGBoost Model      Ranked Docs
+                Semantic            • TF-IDF            • 100 trees        • Score 0.92
+                                    • BM25              • max_depth=6      • Score 0.87
+                                    • Word overlap      • learning_rate=0.1• Score 0.65
+```
 
 
 ## ✨ Features
@@ -57,6 +59,7 @@ Semantic • TF-IDF • 100 trees • Score 0.92
 - 📦 **Modular Design**: Easily extendable components
 
 ## 🏗️ System Architecture
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │ RankSmart System                                                │
 ├─────────────────────────────────────────────────────────────────┤
@@ -94,9 +97,11 @@ Semantic • TF-IDF • 100 trees • Score 0.92
 │  │  3. Document C (Score: 0.65)                         │       │
 │  └──────────────────────────────────────────────────────┘       │
 └─────────────────────────────────────────────────────────────────┘
+```
 
 
 ## 📁 Project Structure
+```text
 search-ranking/
 │
 ├── 📁 data/                          # Training data directory
@@ -130,6 +135,7 @@ search-ranking/
 ├── nginx.conf                        # Reverse proxy config
 ├── Makefile                          # Convenience commands
 └── README.md                         # This file
+```
 
 
 ## 🚀 Quick Start
