@@ -1,0 +1,12 @@
+sentence-transformers>=2.6.0
+faiss-cpu>=1.7.4
+lightgbm>=4.3.0
+catboost>=1.2.3
+tensorflow>=2.15.0
+fastapi-cache2>=0.2.1
+prometheus-client>=0.20.0
+prometheus-fastapi-instrumentator>=7.0.0
+spacy>=3.7.4
+textstat>=0.7.3
+nltk>=3.8.1
+rank_bm25>=0.2.2

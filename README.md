@@ -52,3 +52,46 @@ Open your browser and navigate to:
 
 You can also view the documented Swagger API endpoints natively here:
 **`http://localhost:8000/docs`**
+
+---
+
+## 🧬 Level 5 Advanced Architecture (Optional)
+RankSmart includes a production-grade, highly-advanced semantic retrieval system built right in (`api/advanced_api.py`), mirroring enterprise methodologies.
+
+**It includes:**
+- **Hybrid Retrieval:** FAISS Dense embeddings combined with BM25Okapi sparse metrics.
+- **Deep Semantics:** SentenceTransformers for deep linguistic matching.
+- **Ensemble Ranking:** Optional integration for CatBoost, LightGBM, and XGBoost combination ranking constraints.
+- **In-Memory Caching:** High-speed FastAPICache integration tailored specifically for safe local execution without Redis dependency overhead.
+- **Async Threading:** High-performance background tasks replacing Celery for seamless indexing.
+
+### How to use Advanced Mode
+Because executing this downloads roughly **~4GB** of machine learning models (BERT, Spacy, NLTK, FAISS), it is isolated in its own virtual environment (`adv_env`).
+
+Wait for the installation to finish, and boot it up via:
+```powershell
+.\adv_env\Scripts\python.exe -m uvicorn api.advanced_api:app --reload --host 0.0.0.0 --port 8001
+```
+*(The advanced API runs safely on port 8001 so it never clashes with your native deployment!)*
+
+---
+
+## 🧪 Testing the Advanced Search Engine
+
+To evaluate the true Two-Stage Retrieval capabilities (BM25 Keyword Fetching + FAISS Neural Proximity + XGBoost Re-ranking), the system boots localized with 100 custom software engineering documents. Test the intelligence of the system by using these exact queries:
+
+**Lexical Concept Tests:**
+* `python machine learning`
+* `aws lambda serverless`
+* `kubernetes docker`
+* `css grid responsive`
+* `fastapi restful api`
+* `kali linux penetration`
+* `go goroutines concurrency`
+
+**Deep Semantic Deep-Learning Tests:**
+*(These queries prove the neural network actually understands definitions and isn't just matching raw characters)*
+* `"teach a computer how to play video games"` *(Effectively finds Reinforcement Learning & OpenAI)*
+* `"making a website look good on a phone"` *(Effectively finds Mobile / CSS Responsive Design)*
+* `"stop hackers from stealing passwords"` *(Effectively finds Cryptography & Threat Prevention)*
+* `"how do I store data without a rigid SQL table"` *(Effectively finds MongoDB / NoSQL)*
