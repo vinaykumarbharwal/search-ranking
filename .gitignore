@@ -4,9 +4,13 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 env/
 adv_env/
 .env
+.env.*
+!.env.example
+!deploy/env/.env.prod.example
 
 
 # Models
@@ -28,6 +32,10 @@ data/*.txt
 .coverage
 htmlcov/
 
-# Docker
+# Runtime
 *.log
 redis-data/
+
+# OS
+.DS_Store
+Thumbs.db

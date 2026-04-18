@@ -6,6 +6,7 @@ import numpy as np
 import xgboost as xgb
 import pickle
 import os
+import re
 from features_native import TextFeatureExtractor, FEATURE_NAMES
 
 # Sample documents (your searchable content)
@@ -33,20 +34,56 @@ documents = [
 ]
 
 # Create training data by simulating queries
+def _tokenize(text):
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _build_queries_for_doc(doc):
+    tokens = _tokenize(doc)
+    if not tokens:
+        return []
+
+    # Build multiple query styles per document to improve generalization.
+    unigram_query = " ".join(tokens[:2]) if len(tokens) >= 2 else tokens[0]
+    bigram_query = " ".join(tokens[2:5]) if len(tokens) >= 5 else " ".join(tokens[: min(len(tokens), 3)])
+    tail_query = " ".join(tokens[-3:]) if len(tokens) >= 3 else " ".join(tokens)
+
+    queries = [unigram_query, bigram_query, tail_query]
+    return [q.strip() for q in queries if q.strip()]
+
+
+def _graded_relevance(query, doc, is_primary):
+    query_terms = set(_tokenize(query))
+    doc_terms = set(_tokenize(doc))
+    overlap = len(query_terms & doc_terms)
+    coverage = overlap / max(len(query_terms), 1)
+    exact_phrase = query.lower() in doc.lower()
+
+    if is_primary:
+        return 4 if exact_phrase else 3
+    if exact_phrase and coverage >= 0.67:
+        return 3
+    if coverage >= 0.67:
+        return 2
+    if coverage >= 0.34:
+        return 1
+    return 0
+
+
 def generate_training_data(documents):
-    """Generate synthetic training data from your documents"""
-    queries = [
-        ("python programming", [0, 3]),  # Doc 0 and 3 are relevant
-        ("machine learning", [1, 4, 9]),  # Docs 1,4,9 relevant
-        ("data science", [2, 10]),  # Docs 2,10 relevant
-        ("web development", [3, 11, 16]),  # Web-related docs
-        ("deep learning", [4, 0]),  # Deep learning relevant
-        ("artificial intelligence", [5, 4]),  # AI relevant
-        ("python tutorial", [0, 6]),  # Python tutorials
-        ("cloud computing", [8, 12]),  # Cloud-related
-        ("database design", [14]),  # Database docs
-        ("git version control", [15])  # Git docs
-    ]
+    """Generate pseudo-labeled graded ranking data from your documents."""
+    query_doc_pairs = []
+    for doc_id, doc in enumerate(documents):
+        for query in _build_queries_for_doc(doc):
+            query_doc_pairs.append((query, doc_id))
+
+    # Deduplicate while preserving order.
+    seen = set()
+    deduped_pairs = []
+    for pair in query_doc_pairs:
+        if pair[0] not in seen:
+            deduped_pairs.append(pair)
+            seen.add(pair[0])
     
     X_list = []
     y_list = []
@@ -55,13 +92,12 @@ def generate_training_data(documents):
     extractor = TextFeatureExtractor()
     extractor.fit(documents)
     
-    for qid, (query, relevant_docs) in enumerate(queries):
+    for qid, (query, primary_doc_id) in enumerate(deduped_pairs):
         for doc_id, doc in enumerate(documents):
             features = extractor.extract_features(query, doc)
             X_list.append(features)
-            
-            # Relevance: 3 if relevant, 0 otherwise
-            relevance = 3 if doc_id in relevant_docs else 0
+
+            relevance = _graded_relevance(query, doc, is_primary=(doc_id == primary_doc_id))
             y_list.append(relevance)
             qid_list.append(qid)
     
@@ -69,6 +105,9 @@ def generate_training_data(documents):
 
 print("[*] Generating training data...")
 X, y, qid, extractor = generate_training_data(documents)
+
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+models_dir = os.path.join(repo_root, 'models')
 
 print(f"[OK] Generated {len(X)} training samples")
 print(f"   Features: {X.shape[1]}")
@@ -79,9 +118,11 @@ print("[*] Training LambdaMART model...")
 model = xgb.XGBRanker(
     objective='rank:ndcg',
     eval_metric='ndcg@10',
-    learning_rate=0.1,
-    max_depth=5,
-    n_estimators=50,
+    learning_rate=0.05,
+    max_depth=6,
+    min_child_weight=2,
+    reg_lambda=1.5,
+    n_estimators=220,
     subsample=0.8,
     colsample_bytree=0.8,
     random_state=42
@@ -90,19 +131,22 @@ model = xgb.XGBRanker(
 model.fit(X, y, qid=qid, verbose=True)
 
 # Save model
-os.makedirs('../models', exist_ok=True)
-model.save_model('../models/ranker_native.json')
-print("[OK] Saved: ../models/ranker_native.json")
+os.makedirs(models_dir, exist_ok=True)
+model_path = os.path.join(models_dir, 'ranker_native.json')
+model.save_model(model_path)
+print(f"[OK] Saved: {model_path}")
 
 # Save feature extractor
-with open('../models/extractor_native.pkl', 'wb') as f:
+extractor_path = os.path.join(models_dir, 'extractor_native.pkl')
+with open(extractor_path, 'wb') as f:
     pickle.dump(extractor, f)
-print("[OK] Saved: ../models/extractor_native.pkl")
+print(f"[OK] Saved: {extractor_path}")
 
 # Save feature names
-with open('../models/features_native.pkl', 'wb') as f:
+features_path = os.path.join(models_dir, 'features_native.pkl')
+with open(features_path, 'wb') as f:
     pickle.dump(FEATURE_NAMES, f)
-print("[OK] Saved: ../models/features_native.pkl")
+print(f"[OK] Saved: {features_path}")
 
 # Test prediction
 test_features = extractor.extract_features("python", documents[0])

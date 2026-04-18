@@ -1,22 +1,19 @@
-.PHONY: install train run test docker-up docker-down clean
+.PHONY: install train run run-advanced test clean web benchmark evaluate
 
 install:
 	pip install -r requirements.txt
 
 train:
-	python src/train.py
+	python src/train_native.py
 
 run:
-	uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+	uvicorn api.main_native:app --reload --host 0.0.0.0 --port 8000
+
+run-advanced:
+	uvicorn api.advanced_api:app --reload --host 0.0.0.0 --port 8001
 
 test:
 	pytest tests/ -v
-
-docker-up:
-	docker-compose up -d
-
-docker-down:
-	docker-compose down
 
 clean:
 	rm -rf models/*.pkl models/*.json

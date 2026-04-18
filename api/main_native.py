@@ -1,29 +1,42 @@
 """
-FastAPI backend with native text features
-No Kaggle files needed - works immediately!
+FastAPI backend with native text features.
 """
-from fastapi import FastAPI, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from typing import List, Dict
-import numpy as np
-import xgboost as xgb
-import pickle
+from collections import defaultdict, deque
+import logging
 import os
-import time
+import pickle
 import sys
+import threading
+import time
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+import xgboost as xgb
+
+try:
+    from api.settings import AppSettings, configure_logging
+except ImportError:  # pragma: no cover
+    from settings import AppSettings, configure_logging
 
 # Update path to import from src if needed
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 from features_native import TextFeatureExtractor
 
+settings = AppSettings()
+configure_logging(settings.log_level)
+logger = logging.getLogger("ranksmart.main_native")
+
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets = defaultdict(deque)
+
 app = FastAPI(title="RankSmart Search", description="Text-based search ranking")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.cors_allow_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -51,6 +64,65 @@ DOCUMENTS = [
     "Machine learning algorithms explained with Python code examples",
 ]
 
+
+def _validate_query_text(query: str) -> str:
+    cleaned = query.strip()
+    if not cleaned:
+        raise HTTPException(status_code=422, detail="Query cannot be empty")
+    if len(cleaned) > settings.max_query_length:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Query too long. Max length is {settings.max_query_length} characters",
+        )
+    return cleaned
+
+
+def _validate_top_k(top_k: int) -> int:
+    if top_k > settings.max_top_k:
+        raise HTTPException(
+            status_code=422,
+            detail=f"top_k too high. Max value is {settings.max_top_k}",
+        )
+    return top_k
+
+
+def require_api_key(request: Request) -> None:
+    if not settings.require_api_key:
+        return
+
+    configured_key = settings.api_key.strip()
+    if not configured_key:
+        logger.error("api_key_required_but_missing_configuration")
+        raise HTTPException(status_code=503, detail="API key authentication misconfigured")
+
+    provided_key = request.headers.get(settings.api_key_header_name, "")
+    if provided_key != configured_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.middleware("http")
+async def ip_rate_limit(request: Request, call_next):
+    if request.url.path == "/search":
+        bucket_key = request.client.host if request.client else "unknown"
+        now = time.time()
+        window = settings.rate_limit_window_seconds
+        max_requests = settings.rate_limit_max_requests
+
+        with _rate_limit_lock:
+            bucket = _rate_limit_buckets[bucket_key]
+            while bucket and bucket[0] <= now - window:
+                bucket.popleft()
+
+            if len(bucket) >= max_requests:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Rate limit exceeded"},
+                )
+
+            bucket.append(now)
+
+    return await call_next(request)
+
 @app.on_event("startup")
 async def startup_event():
     global model, extractor, documents
@@ -69,11 +141,16 @@ async def startup_event():
         
         with open(extractor_path, 'rb') as f:
             extractor = pickle.load(f)
-        
-        print(f"✅ Loaded trained model with {len(documents)} documents")
+
+        logger.info("model_loaded documents=%s", len(documents))
     else:
-        # Create simple fallback model
-        print("⚠️ No trained model found, using simple ranking")
+        if settings.strict_model_loading:
+            raise RuntimeError(
+                "Required model artifacts not found. Set STRICT_MODEL_LOADING=false "
+                "to allow degraded startup."
+            )
+
+        logger.warning("model_missing_degraded_mode_enabled")
         model = None
         extractor = None
 
@@ -94,9 +171,15 @@ async def root():
     return {"message": "RankSmart Search API", "status": "running"}
 
 @app.get("/search")
-async def search(query: str = Query(..., min_length=1), top_k: int = 10):
+async def search(
+    query: str = Query(..., min_length=1),
+    top_k: int = Query(default=settings.default_top_k, ge=1),
+    _: None = Depends(require_api_key),
+):
+    query = _validate_query_text(query)
+    top_k = _validate_top_k(top_k)
     start_time = time.time()
-    
+
     if model and extractor:
         # Use ML ranking
         results = []
@@ -122,8 +205,17 @@ async def search(query: str = Query(..., min_length=1), top_k: int = 10):
             {"document": doc, "score": float(score), "id": i}
             for i, (doc, score) in enumerate(ranked[:top_k])
         ]
-    
+
     response_time = (time.time() - start_time) * 1000
+
+    logger.info(
+        "search_completed query_len=%s top_k=%s result_count=%s latency_ms=%.2f degraded=%s",
+        len(query),
+        top_k,
+        len(formatted_results),
+        response_time,
+        not bool(model and extractor),
+    )
     
     return {
         "query": query,
@@ -137,7 +229,8 @@ async def health():
     return {
         "status": "healthy",
         "model_loaded": model is not None,
-        "documents": len(documents)
+        "documents": len(documents),
+        "degraded_mode": not bool(model and extractor),
     }
 
 if __name__ == "__main__":

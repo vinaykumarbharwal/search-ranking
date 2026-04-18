@@ -1,14 +1,33 @@
-from fastapi import FastAPI, BackgroundTasks
+from collections import defaultdict, deque
+import asyncio
+import logging
+import os
+import pickle
+import sys
+import threading
+import time
+from typing import List
+
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi_cache import FastAPICache
 from fastapi_cache.backends.inmemory import InMemoryBackend
 from fastapi_cache.decorator import cache
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-import asyncio
-import sys
-import os
-import pickle
 import xgboost as xgb
-from typing import List
+
+try:
+    from api.settings import AppSettings, configure_logging
+except ImportError:  # pragma: no cover
+    from settings import AppSettings, configure_logging
+
+settings = AppSettings()
+configure_logging(settings.log_level)
+logger = logging.getLogger("ranksmart.advanced_api")
+
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets = defaultdict(deque)
 
 app = FastAPI(title="RankSmart Advanced API", description="Production-grade Learning-to-Rank System")
 
@@ -127,31 +146,138 @@ DOCUMENTS = [
 retriever = None
 ml_model = None
 extractor = None
+initialization_task = None
+initialization_state = "not_started"
+
+
+def _validate_query_text(query: str) -> str:
+    cleaned = query.strip()
+    if not cleaned:
+        raise HTTPException(status_code=422, detail="Query cannot be empty")
+    if len(cleaned) > settings.max_query_length:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Query too long. Max length is {settings.max_query_length} characters",
+        )
+    return cleaned
+
+
+def _validate_top_k(top_k: int) -> int:
+    if top_k > settings.max_top_k:
+        raise HTTPException(
+            status_code=422,
+            detail=f"top_k too high. Max value is {settings.max_top_k}",
+        )
+    return top_k
+
+
+def require_api_key(request: Request) -> None:
+    if not settings.require_api_key:
+        return
+
+    configured_key = settings.api_key.strip()
+    if not configured_key:
+        logger.error("api_key_required_but_missing_configuration")
+        raise HTTPException(status_code=503, detail="API key authentication misconfigured")
+
+    provided_key = request.headers.get(settings.api_key_header_name, "")
+    if provided_key != configured_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.middleware("http")
+async def ip_rate_limit(request: Request, call_next):
+    if request.url.path == "/search":
+        bucket_key = request.client.host if request.client else "unknown"
+        now = time.time()
+        window = settings.rate_limit_window_seconds
+        max_requests = settings.rate_limit_max_requests
+
+        with _rate_limit_lock:
+            bucket = _rate_limit_buckets[bucket_key]
+            while bucket and bucket[0] <= now - window:
+                bucket.popleft()
+
+            if len(bucket) >= max_requests:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Rate limit exceeded"},
+                )
+
+            bucket.append(now)
+
+    return await call_next(request)
 
 @app.on_event("startup")
 async def startup_event():
-    global retriever, ml_model, extractor
-    print("Initializing FAISS and Advanced Language Models (may take a few seconds)...")
-    if HybridRetriever:
-        retriever = HybridRetriever(DOCUMENTS)
-        print("Advanced Vector Models successfully loaded!")
-    else:
-        print("Warning: Advanced modules missing. Using simulated results.")
-        
-    # Load LambdaMART model and extractor
-    root_dir = os.path.dirname(os.path.dirname(__file__))
-    model_path = os.path.join(root_dir, 'models', 'ranker_native.json')
-    extractor_path = os.path.join(root_dir, 'models', 'extractor_native.pkl')
-    
-    if os.path.exists(model_path) and os.path.exists(extractor_path):
-        ml_model = xgb.Booster()
-        ml_model.load_model(model_path)
-        with open(extractor_path, 'rb') as f:
-            extractor = pickle.load(f)
-        print("LambdaMART Machine Learning Engine successfully loaded!")
+    global initialization_task, initialization_state
+    logger.info("advanced_startup_begin")
 
-# Windows Adaptation: Use InMemory caching instead of Redis (Zero installation required)
-FastAPICache.init(InMemoryBackend(), prefix="search-cache")
+    redis_url = os.getenv("REDIS_URL", "").strip()
+    if redis_url:
+        try:
+            from fastapi_cache.backends.redis import RedisBackend
+            from redis import asyncio as redis_asyncio
+
+            redis_client = redis_asyncio.from_url(redis_url, decode_responses=False)
+            FastAPICache.init(RedisBackend(redis_client), prefix="search-cache")
+            logger.info("cache_backend=redis")
+        except ImportError:
+            FastAPICache.init(InMemoryBackend(), prefix="search-cache")
+            logger.warning("cache_backend=inmemory redis_dependency_missing")
+    else:
+        FastAPICache.init(InMemoryBackend(), prefix="search-cache")
+        logger.warning("cache_backend=inmemory")
+
+    initialization_state = "in_progress"
+    initialization_task = asyncio.create_task(_initialize_search_components())
+
+
+async def _initialize_search_components():
+    global retriever, ml_model, extractor, initialization_state
+    try:
+        if HybridRetriever:
+            try:
+                retriever = HybridRetriever(DOCUMENTS)
+                logger.info("retriever_loaded")
+            except Exception as exc:  # pragma: no cover
+                retriever = None
+                logger.exception("retriever_init_failed error=%s", exc)
+        else:
+            logger.warning("retriever_missing_using_fallback")
+
+        # Load LambdaMART model and extractor
+        root_dir = os.path.dirname(os.path.dirname(__file__))
+        model_path = os.path.join(root_dir, 'models', 'ranker_native.json')
+        extractor_path = os.path.join(root_dir, 'models', 'extractor_native.pkl')
+
+        if os.path.exists(model_path) and os.path.exists(extractor_path):
+            ml_model = xgb.Booster()
+            ml_model.load_model(model_path)
+            with open(extractor_path, 'rb') as f:
+                extractor = pickle.load(f)
+            logger.info("model_loaded")
+        elif settings.strict_model_loading:
+            raise RuntimeError(
+                "Required model artifacts not found. Set STRICT_MODEL_LOADING=false "
+                "to allow degraded startup."
+            )
+        else:
+            logger.warning("model_missing_degraded_mode_enabled")
+
+        initialization_state = "ready"
+        logger.info("advanced_startup_ready")
+    except Exception as exc:  # pragma: no cover
+        initialization_state = "failed"
+        logger.exception("advanced_startup_failed error=%s", exc)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allow_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 async def root():
@@ -214,15 +340,31 @@ async def async_index_documents(documents):
 
 @app.get("/search")
 @cache(expire=300)  # Caches identically to Redis, but uses RAM for Windows compatibility
-async def search(query: str, top_k: int = 10, async_mode: bool = False):
+async def search(
+    query: str = Query(..., min_length=1),
+    top_k: int = Query(default=settings.default_top_k, ge=1),
+    async_mode: bool = False,
+    _: None = Depends(require_api_key),
+):
     """Cached, async search endpoint using Memory Backend"""
-    import time
+    query = _validate_query_text(query)
+    top_k = _validate_top_k(top_k)
     start_time = time.time()
     
     # Synchronous search (cached using InMemory)
     results = await perform_search(query, top_k)
     
     execution_time = (time.time() - start_time) * 1000
+
+    logger.info(
+        "search_completed query_len=%s top_k=%s result_count=%s latency_ms=%.2f degraded=%s async_mode=%s",
+        len(query),
+        top_k,
+        len(results),
+        execution_time,
+        not bool(retriever and ml_model and extractor),
+        async_mode,
+    )
     
     return {
         "query": query,
@@ -234,7 +376,11 @@ async def search(query: str, top_k: int = 10, async_mode: bool = False):
     }
 
 @app.post("/index/batch")
-async def batch_index(documents: List[str], background_tasks: BackgroundTasks):
+async def batch_index(
+    documents: List[str],
+    background_tasks: BackgroundTasks,
+    _: None = Depends(require_api_key),
+):
     """Windows-Safe Background indexing (Replaces Celery)"""
     background_tasks.add_task(async_index_documents, documents)
     return {"message": "Indexing started in FastAPI native background thread. No Celery worker needed on Windows!"}
@@ -243,9 +389,13 @@ async def batch_index(documents: List[str], background_tasks: BackgroundTasks):
 async def detailed_health():
     return {
         "status": "highly_advanced",
-        "cache": "InMemory FastAPICache",
+        "cache": "Configured FastAPICache backend",
         "async_tasks": "Native Python",
-        "metrics": "Prometheus Ready"
+        "metrics": "Prometheus Ready",
+        "retriever_loaded": retriever is not None,
+        "model_loaded": ml_model is not None,
+        "initialization_state": initialization_state,
+        "degraded_mode": not bool(retriever and ml_model and extractor),
     }
 
 if __name__ == "__main__":

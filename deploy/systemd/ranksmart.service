@@ -1,0 +1,16 @@
+[Unit]
+Description=RankSmart FastAPI Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/search-ranking
+EnvironmentFile=/opt/search-ranking/deploy/env/.env.prod
+ExecStart=/opt/search-ranking/.venv/bin/uvicorn api.main_native:app --host 0.0.0.0 --port 8000 --workers 2
+Restart=always
+RestartSec=5
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target

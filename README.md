@@ -34,16 +34,14 @@ pip install -r requirements.txt
 ### 2. Train the Model Globally
 Because the system employs native text features, you must generate the ranking model by training it locally on the provided documents.
 ```powershell
-cd src
-python train_native.py
-cd ..
+python src\train_native.py
 ```
 *This will execute seamlessly and export all required `.json` and `.pkl` artifacts into the active `models/` directory.*
 
 ### 3. Launching the Backend Server
 Once your models are spun up, start the FastAPI engine and serve the Web application locally:
 ```powershell
-uvicorn api.main_native:app --reload --host 0.0.0.0 --port 8000
+uvicorn api.main_native:app --reload --reload-dir api --reload-dir src --host 0.0.0.0 --port 8000
 ```
 
 ### 4. Experience the Search
@@ -73,6 +71,24 @@ Wait for the installation to finish, and boot it up via:
 .\adv_env\Scripts\python.exe -m uvicorn api.advanced_api:app --reload --host 0.0.0.0 --port 8001
 ```
 *(The advanced API runs safely on port 8001 so it never clashes with your native deployment!)*
+
+---
+
+## 📦 Deployment (No Docker Required)
+
+Docker is optional and not required for this project.
+
+For VM/server deployment, use the production template in `deploy/`:
+
+- `deploy/env/.env.prod.example` for environment values
+- `deploy/systemd/ranksmart.service` for Linux service supervision
+- `deploy/README.md` for deployment steps
+
+Minimal production start command:
+
+```powershell
+uvicorn api.main_native:app --host 0.0.0.0 --port 8000
+```
 
 ---
 
